@@ -1,7 +1,7 @@
 import os
+import shutil
 
 import cv2
-import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import wget
@@ -11,28 +11,6 @@ from tqdm import tqdm
 import data
 from models import imagebind_model
 from models.imagebind_model import ModalityType
-
-
-def show_anns(anns):
-    if len(anns) == 0:
-        return
-    sorted_anns = sorted(anns, key=(lambda x: x["area"]), reverse=True)
-    ax = plt.gca()
-    ax.set_autoscale_on(False)
-
-    img = np.ones(
-        (
-            sorted_anns[0]["segmentation"].shape[0],
-            sorted_anns[0]["segmentation"].shape[1],
-            4,
-        )
-    )
-    img[:, :, 3] = 0
-    for ann in sorted_anns:
-        m = ann["segmentation"]
-        color_mask = np.concatenate([np.random.random(3), [0.35]])
-        img[m] = color_mask
-    ax.imshow(img)
 
 
 def get_masks(image_path, sam_checkpoint="sam_vit_b_01ec64.pth"):
@@ -76,6 +54,11 @@ def get_masks(image_path, sam_checkpoint="sam_vit_b_01ec64.pth"):
     return sorted_masks, masked_images
 
 
+def write_dicts_to_file(dict_list, file_path):
+    with open(file_path, "w") as f:
+        print("Filename:", dict_list, file=f)
+
+
 def get_embeddings(filepath="./labels.txt", device="cuda:1"):
     colors = ["white", "yellow", "red", "blue", "green"]
     texts = [f"A {color} traffic sign." for color in colors]
@@ -89,6 +72,8 @@ def get_embeddings(filepath="./labels.txt", device="cuda:1"):
     model.eval()
     model.to(device)
     os.makedirs("./crops", exist_ok=True)
+    shutil.rmtree("./wrongs")
+    os.makedirs("./wrongs", exist_ok=True)
     wrongs = []
     with tqdm(range(total)) as pbar:
         for i in range(total):
@@ -120,12 +105,25 @@ def get_embeddings(filepath="./labels.txt", device="cuda:1"):
             )
             approx_colors = [colors[i] for i in range(len(output)) if output[i] > 0.15]
             predicted_color = colors[best]
+
+            wrong_filename = f"wrongs/{os.path.basename(img_path)}.jpg"
             if predicted_color == truth:
                 success_count += 1
                 approx_success_count += 1
                 pbar.set_description("Got it right.")
             elif predicted_color in approx_colors:
                 approx_success_count += 1
+                pbar.set_description("Got it approximately.")
+                wrongs.append(
+                    {
+                        "image_path": crop_filename,
+                        "predicted": predicted_color,
+                        "real_color": truth,
+                        "raw_output": output,
+                    }
+                )
+
+                cv2.imwrite(wrong_filename, crop)
             else:
                 pbar.set_description("Got it wrong.")
                 wrongs.append(
@@ -136,11 +134,12 @@ def get_embeddings(filepath="./labels.txt", device="cuda:1"):
                         "raw_output": output,
                     }
                 )
+
+                cv2.imwrite(wrong_filename, crop)
             pbar.update(1)
     print("Real success", success_count / total)
     print("Approximate success:", approx_success_count / total)
-    with open("wrongs.txt", "w") as f:
-        f.write(wrongs)
+    write_dicts_to_file(wrongs, "wrongs.txt")
 
     """
     output = probs[0].cpu().numpy()
