@@ -9,6 +9,7 @@ from segment_anything import SamAutomaticMaskGenerator, SamPredictor, sam_model_
 from tqdm import tqdm
 
 import data
+from kmeans_classifier import pixels_kmeans
 from models import imagebind_model
 from models.imagebind_model import ModalityType
 
@@ -72,8 +73,9 @@ def get_embeddings(filepath="./labels.txt", device="cuda:1"):
     model.eval()
     model.to(device)
     os.makedirs("./crops", exist_ok=True)
-    shutil.rmtree("./wrongs")
-    os.makedirs("./wrongs", exist_ok=True)
+    if os.path.exists("./wrongs_IB"):
+        shutil.rmtree("./wrongs_IB")
+    os.makedirs("./wrongs_IB", exist_ok=True)
     wrongs = []
     with tqdm(range(total)) as pbar:
         for i in range(total):
@@ -83,7 +85,7 @@ def get_embeddings(filepath="./labels.txt", device="cuda:1"):
             x, y, w, h = cv2.boundingRect(mask)
             img = cv2.imread(img_path)
             crop = img[y : y + h, x : x + w, :]
-            crop_filename = f"crops/{os.path.basename(img_path)}.jpg"
+            crop_filename = f"crops/{os.path.basename(img_path)}"
             cv2.imwrite(crop_filename, crop)
             inputs = {
                 ModalityType.TEXT: data.load_and_transform_text(text_list, device),
@@ -106,7 +108,7 @@ def get_embeddings(filepath="./labels.txt", device="cuda:1"):
             approx_colors = [colors[i] for i in range(len(output)) if output[i] > 0.15]
             predicted_color = colors[best]
 
-            wrong_filename = f"wrongs/{os.path.basename(img_path)}.jpg"
+            wrong_filename = f"wrongs_IB/{os.path.basename(img_path)}"
             if predicted_color == truth:
                 success_count += 1
                 approx_success_count += 1
@@ -141,46 +143,66 @@ def get_embeddings(filepath="./labels.txt", device="cuda:1"):
     print("Approximate success:", approx_success_count / total)
     write_dicts_to_file(wrongs, "wrongs.txt")
 
-    """
-    output = probs[0].cpu().numpy()
-    best = np.argmax(
-        output,
-        axis=0,
-    )
-    for i in range(len(output)):
-        if output[i] > 0.15:
-            print(mask_paths[i])
-    print(f"Best mask: {mask_paths[best]}")
-    """
+
+def kmeans_benchmark(filepath="./labels.txt", colors_number=3):
+    lines = open(filepath, "r").read().splitlines()
+    success_count = 0
+    approx_success_count = 0
+    total = len(lines)
+
+    if os.path.exists("./wrongs_kmeans"):
+        shutil.rmtree("./wrongs_kmeans")
+    os.makedirs("./wrongs_kmeans", exist_ok=True)
+    wrongs = []
+    with tqdm(range(total)) as pbar:
+        for i in range(total):
+            img_path, truth = lines[i].split(" ")
+            crop_filename = f"crops/{os.path.basename(img_path)}"
+
+            output = pixels_kmeans(crop_filename, colors_number)
+
+            predicted_color = output[0]
+            approx_colors = output
+
+            wrong_filename = f"wrongs_kmeans/{os.path.basename(img_path)}"
+            if predicted_color == truth:
+                success_count += 1
+                approx_success_count += 1
+                pbar.set_description("Got it right.")
+            elif predicted_color in approx_colors:
+                approx_success_count += 1
+                pbar.set_description("Got it approximately.")
+                wrongs.append(
+                    {
+                        "image_path": crop_filename,
+                        "predicted": predicted_color,
+                        "real_color": truth,
+                        "raw_output": output,
+                    }
+                )
+
+                cv2.imwrite(wrong_filename, cv2.imread(crop_filename))
+            else:
+                pbar.set_description("Got it wrong.")
+                wrongs.append(
+                    {
+                        "image_path": crop_filename,
+                        "predicted": predicted_color,
+                        "real_color": truth,
+                        "raw_output": output,
+                    }
+                )
+
+                cv2.imwrite(wrong_filename, cv2.imread(crop_filename))
+            pbar.update(1)
+    print("Real success", success_count / total)
+    print("Approximate success:", approx_success_count / total)
+    write_dicts_to_file(wrongs, "wrongs.txt")
 
 
 if __name__ == "__main__":
-    """
-    use_masks = False
-
-    if use_masks:
-        if not os.path.exists("./masks/"):
-            is_masks = False
-            os.makedirs("./masks", exist_ok=True)
-        else:
-            is_masks = True
-        if not is_masks:
-            masks, masked_images = get_masks(image_path=".assets/car_image.jpg")
-            mask_filenames = []
-            for i, masked_image in enumerate(masked_images):
-                filename = f"./masks/mask_{i+1:03d}.jpg"
-                cv2.imwrite(filename, masked_image)
-                mask_filenames.append(filename)
-        else:
-            mask_filenames = ["./masks/" + f for f in os.listdir("./masks/")]
-        print(f"Using {len(os.listdir('./masks/'))} masks.")
-
-        mask_paths = sorted(mask_filenames)
-
-        images_paths = mask_paths
-    else:
-        images_paths = ["./images/" + path for path in sorted(os.listdir("./images/"))]
-    """
-
     device = "cuda:1" if torch.cuda.is_available() else "cpu"
+    print("Performing color detection with IB")
     get_embeddings(device=device)
+    print("Performing color detection with kmeans")
+    kmeans_benchmark()
